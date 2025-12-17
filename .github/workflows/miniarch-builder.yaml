@@ -1,0 +1,274 @@
+name: MiniArch Firmware Builder
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - board_specific
+      architecture:
+        description: 'Target architecture (for full build only)'
+        required: false
+        default: 'aarch64'
+        type: choice
+        options:
+          - aarch64
+          - x86_64
+      board_selection:
+        description: 'Board selection (for board_specific build)'
+        required: false
+        type: choice
+        options:
+          - '1'   # RPi 3/4/5
+          - '2'   # RPi 3/4
+          - '3'   # RPi 5
+          - '10'  # H313 X96 Q
+          - '11'  # H313 X96 Q v5.1
+          - '12'  # H313 X96 Q LPDDR3
+          - '13'  # H313 X96 Q LPDDR3 v1.3
+          - '14'  # H313 Tanix TX1
+          - '15'  # H313 Tanix TX1 v1.2
+          - '20'  # H616 Orange Pi Zero 2
+          - '21'  # H616 Tanix TX6S
+          - '22'  # H616 T95
+          - '23'  # H616 X96 Mate
+          - '24'  # H616 Tanix TX6S AXP313
+          - '25'  # H616 Pendoo X12 Pro
+          - '26'  # H618 Orange Pi Zero 3
+          - '27'  # H618 Vontar H618
+          - '28'  # H618 Orange Pi Zero 2W
+          - '29'  # H618 Transpeed 8K618-T
+          - '30'  # H728 X96Q Pro Plus
+          - '50'  # RK3566 X96 X6
+          - '51'  # RK3566 Quartz64-B
+          - '52'  # RK3566 Rock 3C
+          - '70'  # RK3588S Rock 5A
+          - '71'  # RK3588S Rock 5C
+          - '76'  # RK3588 Rock 5B
+          - '77'  # RK3588 Orange Pi 5 Plus
+          - 'a'   # All boards
+      use_build_cache:
+        description: 'Use build cache from previous release'
+        required: false
+        default: true
+        type: boolean
+      create_release:
+        description: 'Create release with build cache'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  BUILD_USER: minimyth2
+  BUILD_HOME: /home/minimyth2
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    
+    steps:
+      - name: Update system and install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            bison \
+            make \
+            cvs \
+            flex \
+            gawk \
+            mercurial \
+            subversion \
+            texinfo \
+            gcc \
+            glibc \
+            patch \
+            wget \
+            which \
+            git \
+            sudo \
+            base-devel \
+            jq \
+            bc \
+            curl
+      
+      - name: Create build user
+        run: |
+          useradd --create-home --shell /bin/bash $BUILD_USER
+          echo "$BUILD_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          mkdir -p $BUILD_HOME/Desktop
+          mkdir -p $BUILD_HOME/.minimyth2
+          mkdir -p $BUILD_HOME/build
+          chown -R $BUILD_USER:$BUILD_USER $BUILD_HOME
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: minimyth2-src
+      
+      - name: Move source to build directory
+        run: |
+          mv minimyth2-src $BUILD_HOME/Desktop/minimyth2
+          chown -R $BUILD_USER:$BUILD_USER $BUILD_HOME/Desktop/minimyth2
+      
+      - name: Setup build configuration
+        run: |
+          ARCH="${{ github.event.inputs.architecture || 'aarch64' }}"
+          su - $BUILD_USER -c "cp $BUILD_HOME/Desktop/minimyth2/minimyth.conf.mk.example.${ARCH} $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+          
+          # Set mm_HOME variable in config
+          su - $BUILD_USER -c "echo 'mm_HOME = $BUILD_HOME/Desktop/minimyth2' >> $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+          
+          echo "Build configuration for ${ARCH}:"
+          su - $BUILD_USER -c "cat $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+      
+      - name: Restore build cache from previous release
+        if: github.event.inputs.use_build_cache == 'true' || github.event.inputs.use_build_cache == ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== Attempting to restore build cache ==="
+          
+          # Make scripts executable
+          chmod +x $BUILD_HOME/Desktop/minimyth2/.github/scripts/*.sh
+          
+          # Try to restore cache
+          su - $BUILD_USER -c "cd $BUILD_HOME/Desktop/minimyth2 && PROJECT_ROOT=$BUILD_HOME/Desktop/minimyth2 GITHUB_REPOSITORY=${{ github.repository }} GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} ./.github/scripts/restore-build-cache.sh" || echo "No cache found or restore failed, will build from scratch"
+      
+      - name: Build MiniMyth2 firmware
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'full' }}"
+          
+          if [ "$BUILD_TYPE" = "board_specific" ]; then
+            BOARD_SELECTION="${{ github.event.inputs.board_selection || '1' }}"
+            echo "=== Building SD card image for board selection: ${BOARD_SELECTION} ==="
+            
+            # Use miniarch build script for board-specific builds
+            su - $BUILD_USER -c "cd $BUILD_HOME/Desktop/minimyth2/script/meta/miniarch && ./build-image-for-board.sh ${BOARD_SELECTION}"
+          else
+            echo "=== Building full firmware ==="
+            ARCH="${{ github.event.inputs.architecture || 'aarch64' }}"
+            su - $BUILD_USER -c "cd $BUILD_HOME/Desktop/minimyth2/script/meta/minimyth && make build"
+          fi
+        timeout-minutes: 600
+      
+      - name: Check build artifacts
+        run: |
+          echo "=== Build completed ==="
+          echo "Checking for build artifacts..."
+          su - $BUILD_USER -c "ls -lah $BUILD_HOME/Desktop/minimyth2/images/ || echo 'No images directory found'"
+          su - $BUILD_USER -c "find $BUILD_HOME/Desktop/minimyth2 -name '*.img' -o -name '*.tar.gz' -o -name '*.zip' || echo 'No build artifacts found'"
+      
+      - name: Prepare artifacts for upload
+        if: success()
+        run: |
+          mkdir -p /tmp/artifacts
+          
+          # Copy images if they exist
+          if [ -d "$BUILD_HOME/Desktop/minimyth2/images" ]; then
+            cp -r $BUILD_HOME/Desktop/minimyth2/images/* /tmp/artifacts/ || true
+          fi
+          
+          # Find and copy any other build artifacts
+          find $BUILD_HOME/Desktop/minimyth2 -type f \( -name "*.img" -o -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} /tmp/artifacts/ \; || true
+          
+          # Create a build info file
+          echo "Build Date: $(date)" > /tmp/artifacts/build-info.txt
+          echo "Architecture: ${{ github.event.inputs.architecture || 'aarch64' }}" >> /tmp/artifacts/build-info.txt
+          echo "Commit: ${{ github.sha }}" >> /tmp/artifacts/build-info.txt
+          echo "Branch: ${{ github.ref_name }}" >> /tmp/artifacts/build-info.txt
+          
+          ls -lah /tmp/artifacts/
+      
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimyth2-${{ github.event.inputs.build_type || 'full' }}-${{ github.event.inputs.board_selection || github.event.inputs.architecture || 'aarch64' }}-${{ github.sha }}
+          path: /tmp/artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            ${{ env.BUILD_HOME }}/Desktop/minimyth2/script/meta/minimyth/*.log
+            ${{ env.BUILD_HOME }}/Desktop/minimyth2/log/
+          retention-days: 7
+          if-no-files-found: ignore
+      
+      - name: Archive build cache
+        if: success()
+        run: |
+          echo "=== Creating build cache archive ==="
+          
+          # Make scripts executable
+          chmod +x $BUILD_HOME/Desktop/minimyth2/.github/scripts/*.sh
+          
+          # Create archive
+          su - $BUILD_USER -c "cd $BUILD_HOME/Desktop/minimyth2 && PROJECT_ROOT=$BUILD_HOME/Desktop/minimyth2 ./.github/scripts/archive-build-cache.sh"
+          
+          # Move cache to accessible location
+          mkdir -p /tmp/build-cache
+          cp -r $BUILD_HOME/Desktop/minimyth2/build-cache/* /tmp/build-cache/ || true
+          
+          echo "=== Build cache files ==="
+          ls -lh /tmp/build-cache/
+      
+      - name: Upload build cache as artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-cache-${{ github.sha }}
+          path: /tmp/build-cache/
+          retention-days: 90
+          if-no-files-found: warn
+      
+      - name: Create Release with Build Cache
+        if: success() && (github.event.inputs.create_release == 'true' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-cache-${{ github.sha }}
+          name: Build Cache - ${{ github.event.inputs.build_type || 'full' }} - ${{ github.sha }}
+          body: |
+            ## MiniMyth2 Build Cache
+            
+            This release contains the build cache for faster subsequent builds.
+            
+            **Build Information:**
+            - Build Type: ${{ github.event.inputs.build_type || 'full' }}
+            - Architecture: ${{ github.event.inputs.architecture || 'aarch64' }}
+            - Board: ${{ github.event.inputs.board_selection || 'N/A' }}
+            - Commit: ${{ github.sha }}
+            - Branch: ${{ github.ref_name }}
+            - Build Date: ${{ github.event.head_commit.timestamp }}
+            
+            **Usage:**
+            The build cache will be automatically restored in future builds when `use_build_cache` is enabled.
+            
+            **Manual Restore:**
+            ```bash
+            # Download and extract cache
+            ./.github/scripts/restore-build-cache.sh
+            ```
+            
+            **Note:** Large cache files are automatically split into parts and will be reassembled during restore.
+          files: /tmp/build-cache/*
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
