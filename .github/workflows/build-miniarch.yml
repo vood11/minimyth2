@@ -1,0 +1,133 @@
+name: Build MiniMyth2 Firmware
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: 'Target architecture'
+        required: true
+        default: 'aarch64'
+        type: choice
+        options:
+          - aarch64
+          - x86_64
+
+env:
+  BUILD_USER: minimyth2
+  BUILD_HOME: /home/minimyth2
+
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    
+    steps:
+      - name: Update system and install dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            bison \
+            make \
+            cvs \
+            flex \
+            gawk \
+            mercurial \
+            subversion \
+            texinfo \
+            gcc \
+            glibc \
+            patch \
+            wget \
+            which \
+            git \
+            sudo \
+            base-devel
+      
+      - name: Create build user
+        run: |
+          useradd --create-home --shell /bin/bash $BUILD_USER
+          echo "$BUILD_USER ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+          mkdir -p $BUILD_HOME/Desktop
+          mkdir -p $BUILD_HOME/.minimyth2
+          mkdir -p $BUILD_HOME/build
+          chown -R $BUILD_USER:$BUILD_USER $BUILD_HOME
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          path: minimyth2-src
+      
+      - name: Move source to build directory
+        run: |
+          mv minimyth2-src $BUILD_HOME/Desktop/minimyth2
+          chown -R $BUILD_USER:$BUILD_USER $BUILD_HOME/Desktop/minimyth2
+      
+      - name: Setup build configuration
+        run: |
+          ARCH="${{ github.event.inputs.architecture || 'aarch64' }}"
+          su - $BUILD_USER -c "cp $BUILD_HOME/Desktop/minimyth2/minimyth.conf.mk.example.${ARCH} $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+          
+          # Set mm_HOME variable in config
+          su - $BUILD_USER -c "echo 'mm_HOME = $BUILD_HOME/Desktop/minimyth2' >> $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+          
+          echo "Build configuration for ${ARCH}:"
+          su - $BUILD_USER -c "cat $BUILD_HOME/.minimyth2/minimyth.conf.mk"
+      
+      - name: Build MiniMyth2 firmware
+        run: |
+          su - $BUILD_USER -c "cd $BUILD_HOME/Desktop/minimyth2/script/meta/minimyth && make build"
+        timeout-minutes: 600
+      
+      - name: Check build artifacts
+        run: |
+          echo "=== Build completed ==="
+          echo "Checking for build artifacts..."
+          su - $BUILD_USER -c "ls -lah $BUILD_HOME/Desktop/minimyth2/images/ || echo 'No images directory found'"
+          su - $BUILD_USER -c "find $BUILD_HOME/Desktop/minimyth2 -name '*.img' -o -name '*.tar.gz' -o -name '*.zip' || echo 'No build artifacts found'"
+      
+      - name: Prepare artifacts for upload
+        if: success()
+        run: |
+          mkdir -p /tmp/artifacts
+          
+          # Copy images if they exist
+          if [ -d "$BUILD_HOME/Desktop/minimyth2/images" ]; then
+            cp -r $BUILD_HOME/Desktop/minimyth2/images/* /tmp/artifacts/ || true
+          fi
+          
+          # Find and copy any other build artifacts
+          find $BUILD_HOME/Desktop/minimyth2 -type f \( -name "*.img" -o -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} /tmp/artifacts/ \; || true
+          
+          # Create a build info file
+          echo "Build Date: $(date)" > /tmp/artifacts/build-info.txt
+          echo "Architecture: ${{ github.event.inputs.architecture || 'aarch64' }}" >> /tmp/artifacts/build-info.txt
+          echo "Commit: ${{ github.sha }}" >> /tmp/artifacts/build-info.txt
+          echo "Branch: ${{ github.ref_name }}" >> /tmp/artifacts/build-info.txt
+          
+          ls -lah /tmp/artifacts/
+      
+      - name: Upload build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimyth2-firmware-${{ github.event.inputs.architecture || 'aarch64' }}-${{ github.sha }}
+          path: /tmp/artifacts/
+          retention-days: 30
+          if-no-files-found: warn
+      
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.sha }}
+          path: |
+            ${{ env.BUILD_HOME }}/Desktop/minimyth2/script/meta/minimyth/*.log
+            ${{ env.BUILD_HOME }}/Desktop/minimyth2/log/
+          retention-days: 7
+          if-no-files-found: ignore
