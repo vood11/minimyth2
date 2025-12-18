@@ -51,7 +51,7 @@ get_build_metadata() {
   "git_commit": "$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo 'unknown')",
   "git_branch": "$(git -C "$PROJECT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')",
   "architecture": "${ARCH:-aarch64}",
-  "hostname": "$(hostname)",
+  "hostname": "$(hostname 2>/dev/null || echo 'unknown')",
   "build_user": "$(whoami)"
 }
 EOF
@@ -199,7 +199,7 @@ create_archive() {
 # Function to split archive if needed
 split_archive() {
     local archive_file="$1"
-    local archive_size=$(stat -f%z "$archive_file" 2>/dev/null || stat -c%s "$archive_file" 2>/dev/null)
+    local archive_size=$(stat -c%s "$archive_file" 2>/dev/null || stat -f%z "$archive_file" 2>/dev/null || echo "0")
     local max_size=$(numfmt --from=iec "$MAX_PART_SIZE")
     
     if [ "$archive_size" -gt "$max_size" ]; then
