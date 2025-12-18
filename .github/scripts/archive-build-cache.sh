@@ -6,6 +6,7 @@
 #
 
 set -e
+set -o pipefail
 
 VERSION="1.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -174,15 +175,16 @@ create_archive() {
     log_info "This may take a while..."
     
     # Create tar archive with compression and progress
+    # Use tar's checkpoint feature for progress indication
     tar -czf "$archive_name" \
         --exclude-from="$exclude_file" \
         -C "$PROJECT_ROOT" \
         --checkpoint=10000 \
-        --checkpoint-action=dot \
-        "${dirs[@]/#$PROJECT_ROOT\//}" 2>&1 | \
-        while IFS= read -r line; do
-            echo -n "."
-        done
+        --checkpoint-action=echo='.' \
+        "${dirs[@]/#$PROJECT_ROOT\//}" 2>&1 || {
+            log_error "tar command failed with exit code $?"
+            return 1
+        }
     
     echo ""
     
