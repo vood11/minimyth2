@@ -1,4 +1,4 @@
-name: MiniArch Firmware Builder
+name: MiniMyth Firmware Builder
 
 on:
   push:
